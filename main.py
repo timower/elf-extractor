@@ -120,6 +120,11 @@ class Binary:
     def read_i32(self, va):
         return to_i32(self.lief_binary.get_content_from_virtual_address(va, 4))
 
+    def get_symbol(self, got_addr):
+        relocation = self.lief_binary.get_relocation(got_addr)
+        assert relocation.has_symbol and relocation.addend == 0
+        return relocation.symbol
+
     def decode_plt(self, content, va):
         content = content[:4*3] # PLT is 3 instructions
         instrs = list(self.cs.disasm(content, va))
@@ -148,10 +153,7 @@ class Binary:
         offset3 = instrs[2].operands[1].value.mem.disp
 
         got_addr = va + 8 + offset1 + offset2 + offset3
-
-        relocation = self.lief_binary.get_relocation(got_addr)
-        assert relocation.has_symbol and relocation.addend == 0
-        return relocation.symbol
+        return self.get_symbol(got_addr)
 
     def is_plt_addr(self, addr):
         return is_plt(self.lief_binary.section_from_virtual_address(addr))
@@ -178,13 +180,27 @@ class DisAsmCtx:
     labels: dict = field(default_factory=dict)
 
     data_in_code: dict = field(default_factory=dict)
+
     reg_state: dict = field(default_factory=dict)
+    new_reg_state: dict = field(default_factory=dict)
 
     # data sections to emit
     data_labels: dictdict = field(default_factory=dictdict)
 
     def reset_state(self):
         self.reg_state = {}
+
+    def update_reg_state(self, inst):
+        # Reset regs in reg state
+        regs_read, regs_write = inst.regs_access()
+        for reg in regs_write:
+            if reg in self.reg_state:
+                del self.reg_state[reg]
+
+        for reg in self.new_reg_state:
+            self.reg_state[reg] = self.new_reg_state[reg]
+
+        self.new_reg_state = {}
 
     def get_label(self, address):
         section = self.binary.lief_binary.section_from_virtual_address(address)
@@ -202,7 +218,7 @@ class DisAsmCtx:
 
         label = f".L{hex(address)}"
         self.labels[address] = label
-        self.addresses.append(address)
+        self.addresses.append((address, self.reg_state.copy())) # TODO: new reg state?
         return label
 
     def get_data_label(self, section, address):
@@ -218,7 +234,7 @@ class DisAsmCtx:
 
     def handle_pc_ldr(self, inst, label):
         assert inst.operands[0].type == capstone.arm.ARM_OP_REG
-        self.reg_state[inst.operands[0].value.reg] = label
+        self.new_reg_state[inst.operands[0].value.reg] = label
 
     def handle_pic_ref(self, address, reg):
         assert reg in self.reg_state
@@ -237,7 +253,7 @@ class DisAsmCtx:
         elif is_got(pic_section):
             assert pic_section.virtual_address == pic_va
             self.data_in_code[pic_name] = f"{GOT_NAME} - ({pic_label} + 8)"
-            self.reg_state[reg] = GOT_NAME
+            self.new_reg_state[reg] = GOT_NAME # TODO: reg state?
         else:
             print(f"TODO PIC ref @ {hex(inst.address)}: {pic_name} -> {hex(pic_va)}")
 
@@ -251,7 +267,7 @@ class DisAsmCtx:
                 last_op.mem.base == capstone.arm.ARM_REG_PC:
 
             if last_op.mem.index != 0:
-                # ldr rx, [ry, pc] handled by pic data refs
+                # ldr rx, [ry, pc] handle by `handle_pic_ref`
                 return default
 
             op_va = inst.address + last_op.mem.disp + 8
@@ -275,13 +291,15 @@ def disassemble_at(binary, address, name=None):
     section = binary.lief_binary.section_from_virtual_address(address)
     eprint(f"Extracting function @ {hex(address)} in {section.name}\n")
 
-    ctx = DisAsmCtx(binary, [address])
+    ctx = DisAsmCtx(binary, [(address, {})])
     ctx.labels[address] = name
 
     while len(ctx.addresses) != 0:
-        cur_va = ctx.addresses.pop()
+        cur_va, cur_state = ctx.addresses.pop()
         if cur_va in ctx.instructions:
             continue
+
+        ctx.reg_state = cur_state
 
         section = binary.lief_binary.section_from_virtual_address(cur_va)
         offset = cur_va - section.virtual_address
@@ -291,8 +309,6 @@ def disassemble_at(binary, address, name=None):
 
         if is_plt(section):
             continue
-
-        ctx.reset_state()
 
         for inst in binary.cs.disasm(content, cur_va):
             if (is_branch_reg(inst) and \
@@ -316,14 +332,28 @@ def disassemble_at(binary, address, name=None):
                 mem_op = inst.operands[1]
                 base_reg = mem_op.value.mem.base
                 idx_reg = mem_op.value.mem.index
-                print(f"TODO: {inst} {base_reg} {ctx.reg_state[idx_reg]}")
 
                 if base_reg == capstone.arm.ARM_REG_PC and idx_reg in ctx.reg_state:
                     ctx.handle_pic_ref(inst.address, idx_reg)
-                elif base_reg in ctx.reg_state and ctx.reg_state[base_reg] == GOT_NAME:
-                    print("TODO: got ref")
+                elif base_reg in ctx.reg_state and ctx.reg_state[base_reg] == GOT_NAME and idx_reg in ctx.reg_state:
+                    offset_name = ctx.reg_state[idx_reg]
+                    offset_val = ctx.data_in_code[offset_name]
+
+                    got_section = binary.lief_binary.get_section(".got")
+                    got_addr = got_section.virtual_address + offset_val
+                    got_val = binary.read_i32(got_addr)
+
+                    if got_val == 0:
+                        data_label = binary.get_symbol(got_addr).name
+                    else:
+                        data_section = binary.lief_binary.section_from_virtual_address(got_val)
+                        data_label = ctx.get_data_label(data_section, got_val)
+
+                    ctx.data_in_code[offset_name] = f"{data_label}(GOT)"
                 elif idx_reg in ctx.reg_state and ctx.reg_state[idx_reg] == GOT_NAME:
                     print("TODO: idx GOT ref")
+
+            ctx.update_reg_state(inst)
 
             if binary.is_end_of_function(inst):
                 break
