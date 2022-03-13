@@ -9,6 +9,8 @@ import argparse
 from dataclasses import dataclass, field
 from collections import defaultdict
 
+GOT_NAME = "_GLOBAL_OFFSET_TABLE_"
+
 def eprint(*args, **kwargs):
     print(*args, file=sys.stderr, **kwargs)
 
@@ -36,6 +38,7 @@ def is_call(inst):
     return inst.mnemonic.startswith("bl") or inst.mnemonic.startswith("blx")
 
 def is_pic_add(inst):
+    """ add r3, pc, r """
     if len(inst.operands) != 3:
         return False
     op1 = inst.operands[0]
@@ -51,6 +54,28 @@ def is_pic_add(inst):
             op1.value.reg == op3.value.reg and \
             op2.value.reg == capstone.arm.ARM_REG_PC
 
+def is_pic_load(inst):
+    """
+      ldr r3, [r4, r3]
+      with r4 == got, r3 == got offset
+      or r4 == pc, r3 == PIC offset
+    """
+    if len(inst.operands) != 2:
+      return False
+    op1 = inst.operands[0]
+    op2 = inst.operands[1]
+
+    reg_type = capstone.arm.ARM_OP_REG
+    mem_type = capstone.arm.ARM_OP_MEM
+
+    return inst.mnemonic == "ldr" and \
+            op1.type == reg_type and op2.type == mem_type and \
+            op2.value.mem.disp == 0 and op2.value.mem.index != 0
+            # and \
+            # ((op2.value.mem.base == capstone.arm.ARM_REG_PC and \
+            #   op2.value.mem.disp == 0)) #  or \
+
+
 def is_plt(section):
     return section.name == ".plt"
 
@@ -59,6 +84,9 @@ def is_data(section):
 
 def is_bss(section):
     return section.name == ".bss"
+
+def is_got(section):
+    return section.name == ".got"
 
 def is_text(section):
     return section.name == ".text"
@@ -192,6 +220,27 @@ class DisAsmCtx:
         assert inst.operands[0].type == capstone.arm.ARM_OP_REG
         self.reg_state[inst.operands[0].value.reg] = label
 
+    def handle_pic_ref(self, address, reg):
+        assert reg in self.reg_state
+
+        pic_name = self.reg_state[reg]
+        pic_va = self.data_in_code[pic_name] + address + 8
+        pic_label = self.get_label(address)
+
+        pic_section = self.binary.lief_binary.section_from_virtual_address(pic_va)
+        if is_data(pic_section) or is_bss(pic_section):
+            data_label = self.get_data_label(pic_section, pic_va)
+            self.data_in_code[pic_name] = f"{data_label} - ({pic_label} + 8)"
+        elif is_text(pic_section):
+            label = self.get_label(pic_va)
+            self.data_in_code[pic_name] = f"{label} - ({pic_label} + 8)"
+        elif is_got(pic_section):
+            assert pic_section.virtual_address == pic_va
+            self.data_in_code[pic_name] = f"{GOT_NAME} - ({pic_label} + 8)"
+            self.reg_state[reg] = GOT_NAME
+        else:
+            print(f"TODO PIC ref @ {hex(inst.address)}: {pic_name} -> {hex(pic_va)}")
+
     def inst_to_str(self, inst):
         default = f"{inst.mnemonic} {inst.op_str}"
         if len(inst.operands) == 0:
@@ -261,21 +310,20 @@ def disassemble_at(binary, address, name=None):
 
             if is_pic_add(inst):
                 reg = inst.operands[2].value.reg
-                assert reg in ctx.reg_state
+                ctx.handle_pic_ref(inst.address, reg)
 
-                pic_name = ctx.reg_state[reg]
-                pic_va = ctx.data_in_code[pic_name] + inst.address + 8
-                pic_label = ctx.get_label(inst.address)
+            if is_pic_load(inst):
+                mem_op = inst.operands[1]
+                base_reg = mem_op.value.mem.base
+                idx_reg = mem_op.value.mem.index
+                print(f"TODO: {inst} {base_reg} {ctx.reg_state[idx_reg]}")
 
-                pic_section = binary.lief_binary.section_from_virtual_address(pic_va)
-                if is_data(pic_section) or is_bss(pic_section):
-                    data_label = ctx.get_data_label(pic_section, pic_va)
-                    ctx.data_in_code[pic_name] = f"{data_label} - ({pic_label} + 8)"
-                elif is_text(pic_section):
-                    label = ctx.get_label(pic_va)
-                    ctx.data_in_code[pic_name] = f"{label} - ({pic_label} + 8)"
-                else:
-                    print(f"TODO PIC ref @ {hex(inst.address)}: {pic_name} -> {hex(pic_va)}")
+                if base_reg == capstone.arm.ARM_REG_PC and idx_reg in ctx.reg_state:
+                    ctx.handle_pic_ref(inst.address, idx_reg)
+                elif base_reg in ctx.reg_state and ctx.reg_state[base_reg] == GOT_NAME:
+                    print("TODO: got ref")
+                elif idx_reg in ctx.reg_state and ctx.reg_state[idx_reg] == GOT_NAME:
+                    print("TODO: idx GOT ref")
 
             if binary.is_end_of_function(inst):
                 break
