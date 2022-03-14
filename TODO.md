@@ -1,14 +1,3 @@
- * PIC refs cross BBs
-  --> angr / smarted reg state
- * PIC ref got
+ * 'data in code' in code
+ * GOT ref through stack spill
 
- * GOT reg through stack spill
-
- * jump tables
-  cmp r4, #8
-  addls pc, pc, r4, lsl #2
-  b ..
-; table:
-  b ..
-  b ..
-  ..

@@ -118,6 +118,9 @@ class Binary:
         return self.lief_binary.header.entrypoint
 
     def read_i32(self, va):
+        sect = self.lief_binary.section_from_virtual_address(va)
+        if sect.name == ".bss":
+            return 0
         return to_i32(self.lief_binary.get_content_from_virtual_address(va, 4))
 
     def get_symbol(self, got_addr):
@@ -229,6 +232,14 @@ class DisAsmCtx:
             return section_labels[offset]
 
         name = f".Ldata{hex(address)}"
+        # for i in range(0, min(0x100, section.size - offset), 4):
+        #     test_addr = self.binary.read_i32(address + i)
+        #     try:
+        #         sect = self.binary.lief_binary.section_from_virtual_address(test_addr)
+        #         if sect.virtual_address != 0:
+        #             print(f"TODO: ref in data? {name} + {hex(i)}-> {hex(test_addr)} {sect.name}")
+        #     except:
+        #         pass
         section_labels[offset] = name
         return name
 
@@ -283,6 +294,42 @@ class DisAsmCtx:
 
         return default
 
+    def get_jump_table_size(self, inst, prev_inst):
+        """
+            cmp r3, #5
+            addls pc, pc, r3, lsl #
+        """
+        if inst.mnemonic != "addls" or len(inst.operands) != 3:
+            return None
+
+        if prev_inst is None or prev_inst.mnemonic != "cmp" or len(prev_inst.operands) != 2:
+            return None
+
+        op1 = inst.operands[0]
+        op2 = inst.operands[1]
+        op3 = inst.operands[2]
+
+        prev_op1 = prev_inst.operands[0]
+        prev_op2 = prev_inst.operands[1]
+
+        reg_type = capstone.arm.ARM_OP_REG
+        if op1.type != reg_type or op2.type != reg_type or op3.type != reg_type or \
+                prev_op1.type != reg_type or prev_op2.type != capstone.arm.ARM_OP_IMM:
+            return None
+
+        pc_reg = capstone.arm.ARM_REG_PC
+        if op1.value.reg != pc_reg or op2.value.reg != pc_reg:
+            return None
+
+        if op3.value.reg != prev_op1.value.reg:
+            return None
+
+        if op3.shift.type != capstone.arm.ARM_SFT_LSL or op3.shift.value != 2:
+            return None
+
+        return prev_op2.value.imm
+
+
 def disassemble_at(binary, address, name=None):
     if name is None:
         name = "extracted_func"
@@ -310,11 +357,13 @@ def disassemble_at(binary, address, name=None):
         if is_plt(section):
             continue
 
+        prev_inst = None
         for inst in binary.cs.disasm(content, cur_va):
-            if (is_branch_reg(inst) and \
+            jump_table_size = ctx.get_jump_table_size(inst, prev_inst)
+            if jump_table_size is None and ((is_branch_reg(inst) and \
                     inst.operands[0].value.reg != capstone.arm.ARM_REG_LR) or \
                (len(inst.operands) > 1 and \
-                    inst.operands[0].value.reg == capstone.arm.ARM_REG_PC):
+                    inst.operands[0].value.reg == capstone.arm.ARM_REG_PC)):
                 print(f"TODO: indirect branch {inst}")
 
             if is_branch(inst) and not is_branch_reg(inst):
@@ -323,6 +372,9 @@ def disassemble_at(binary, address, name=None):
                 ctx.instructions[inst.address] = f"{inst.mnemonic} {label}"
             else:
                 ctx.instructions[inst.address] = ctx.inst_to_str(inst)
+
+            if jump_table_size is not None:
+                ctx.addresses.extend([(inst.address + 8 + i * 4, ctx.reg_state.copy()) for i in range(jump_table_size + 1)])
 
             if is_pic_add(inst):
                 reg = inst.operands[2].value.reg
@@ -357,6 +409,8 @@ def disassemble_at(binary, address, name=None):
 
             if binary.is_end_of_function(inst):
                 break
+
+            prev_inst = inst
 
     print(f".global {name}")
     for addr in sorted(ctx.instructions):

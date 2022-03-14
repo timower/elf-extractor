@@ -36,7 +36,7 @@ shutdownThreads.s:
 	../main.py xochitl_2.12.1.527 --address 0x3d96b8 > $@
 
 update.s:
-	../main.py xochitl_2.12.1.527 --address 0x3d72bc > $@
+	../main.py xochitl_2.12.1.527 --address 0x3d8c94 > $@
 
 
 .PHONY: clean all test_main
