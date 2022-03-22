@@ -2,9 +2,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-extern int extracted_func(int);
+extern int to_extract(int);
 
 int main(int argc, char *argv[]) {
   int a = atoi(argv[1]);
-  printf("f(%d)=%d\n", a, extracted_func(a));
+  printf("f(%d)=%d\n", a, to_extract(a));
 }

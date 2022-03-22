@@ -15,6 +15,13 @@ def eprint(*args, **kwargs):
     print(*args, file=sys.stderr, **kwargs)
 
 # Utilities
+def is_terminator(label):
+    if label == "exit":
+        return True
+    if "__throw_" in label:
+        return True
+    return False
+
 def is_return(inst):
     if inst.mnemonic == "bx" and inst.op_str == "lr":
         return True
@@ -161,12 +168,12 @@ class Binary:
     def is_plt_addr(self, addr):
         return is_plt(self.lief_binary.section_from_virtual_address(addr))
 
-    def is_end_of_function(self, inst):
+    def is_end_of_block(self, inst):
         if is_return(inst):
             return True
 
-        # Tail call to plt function
-        if inst.mnemonic == "b": # and self.is_plt_addr(inst.operands[0].value.imm):
+        # Tail call function
+        if inst.mnemonic == "b":
             return True
 
         return False
@@ -183,6 +190,7 @@ class DisAsmCtx:
     labels: dict = field(default_factory=dict)
 
     data_in_code: dict = field(default_factory=dict)
+    data_in_code_addr: dict = field(default_factory=dict)
 
     reg_state: dict = field(default_factory=dict)
     new_reg_state: dict = field(default_factory=dict)
@@ -286,6 +294,7 @@ class DisAsmCtx:
 
             name = f".LDIC{hex(op_va)}"
             self.data_in_code[name] = op_value
+            self.data_in_code_addr[op_va] = name
 
             if inst.mnemonic == "ldr":
                 self.handle_pc_ldr(inst, name)
@@ -330,16 +339,14 @@ class DisAsmCtx:
         return prev_op2.value.imm
 
 
-def disassemble_at(binary, address, name=None):
-    if name is None:
-        name = "extracted_func"
+def disassemble_at(binary, addresses, names=None):
+    if names is None:
+        names = [f"extracted_func_{hex(address)}" for address in addresses]
 
-    # TODO: branch to other section?
-    section = binary.lief_binary.section_from_virtual_address(address)
-    eprint(f"Extracting function @ {hex(address)} in {section.name}\n")
+    ctx = DisAsmCtx(binary, [(address, {}) for address in addresses])
 
-    ctx = DisAsmCtx(binary, [(address, {})])
-    ctx.labels[address] = name
+    for address, name in zip(addresses, names):
+        ctx.labels[address] = name
 
     while len(ctx.addresses) != 0:
         cur_va, cur_state = ctx.addresses.pop()
@@ -370,11 +377,16 @@ def disassemble_at(binary, address, name=None):
                 target_addr = inst.operands[0].value.imm
                 label = ctx.get_label(target_addr)
                 ctx.instructions[inst.address] = f"{inst.mnemonic} {label}"
+                if is_terminator(label):
+                    break
             else:
                 ctx.instructions[inst.address] = ctx.inst_to_str(inst)
 
             if jump_table_size is not None:
-                ctx.addresses.extend([(inst.address + 8 + i * 4, ctx.reg_state.copy()) for i in range(jump_table_size + 1)])
+                jump_addresses = [
+                        (inst.address + 8 + i * 4, ctx.reg_state.copy())
+                        for i in range(jump_table_size + 1)]
+                ctx.addresses.extend(jump_addresses)
 
             if is_pic_add(inst):
                 reg = inst.operands[2].value.reg
@@ -387,7 +399,8 @@ def disassemble_at(binary, address, name=None):
 
                 if base_reg == capstone.arm.ARM_REG_PC and idx_reg in ctx.reg_state:
                     ctx.handle_pic_ref(inst.address, idx_reg)
-                elif base_reg in ctx.reg_state and ctx.reg_state[base_reg] == GOT_NAME and idx_reg in ctx.reg_state:
+                elif base_reg in ctx.reg_state and ctx.reg_state[base_reg] == GOT_NAME and \
+                        idx_reg in ctx.reg_state:
                     offset_name = ctx.reg_state[idx_reg]
                     offset_val = ctx.data_in_code[offset_name]
 
@@ -399,7 +412,10 @@ def disassemble_at(binary, address, name=None):
                         data_label = binary.get_symbol(got_addr).name
                     else:
                         data_section = binary.lief_binary.section_from_virtual_address(got_val)
-                        data_label = ctx.get_data_label(data_section, got_val)
+                        if is_text(data_section):
+                            data_label = ctx.get_label(got_val)
+                        else:
+                            data_label = ctx.get_data_label(data_section, got_val)
 
                     ctx.data_in_code[offset_name] = f"{data_label}(GOT)"
                 elif idx_reg in ctx.reg_state and ctx.reg_state[idx_reg] == GOT_NAME:
@@ -407,24 +423,27 @@ def disassemble_at(binary, address, name=None):
 
             ctx.update_reg_state(inst)
 
-            if binary.is_end_of_function(inst):
+            if binary.is_end_of_block(inst):
                 break
 
             prev_inst = inst
 
-    print(f".global {name}")
-    for addr in sorted(ctx.instructions):
-        inst = ctx.instructions[addr]
+    print(".syntax unified")
+    for name in names:
+        print(f".global {name}")
+    for addr in sorted(ctx.instructions.keys() | ctx.data_in_code_addr.keys()):
         if addr in ctx.labels:
             print(f"\n{ctx.labels[addr]}:")
-        print(inst)
 
-    print()
+        if addr in ctx.instructions:
+            inst = ctx.instructions[addr]
+            print(inst)
 
-    # TODO: interleave with instructions
-    for name, val in ctx.data_in_code.items():
-        print(f"{name}:")
-        print(f".word {val}")
+        if addr in ctx.data_in_code_addr:
+            name = ctx.data_in_code_addr[addr]
+            val = ctx.data_in_code[name]
+            print(f"\n{name}:")
+            print(f".word {val}")
 
     print()
 
@@ -433,6 +452,7 @@ def disassemble_at(binary, address, name=None):
         first_offset = label_offsets[0]
 
         print(f".section {section.name}")
+        print(f".align {section.alignment}")
         if is_bss(section):
             for i in range(len(label_offsets)):
                 offset = label_offsets[i]
@@ -460,12 +480,11 @@ def main(args):
     address = binary.get_entry()
 
     if args.address:
-        address = args.address
+        disassemble_at(binary, args.address, args.name)
     elif args.symbol:
-        symbol = binary.lief_binary.get_symbol(args.symbol)
-        address = symbol.value
+        symbols = [binary.lief_binary.get_symbol(symbol).value for symbol in args.symbol]
+        disassemble_at(binary, symbols, args.symbol)
 
-    disassemble_at(binary, address, args.name)
 
 
 if __name__ == "__main__":
@@ -475,9 +494,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('input', type=str, help="Input binary")
 
-    parser.add_argument('--address', type=auto_int, help="Address of func to extract")
-    parser.add_argument('--symbol', type=str, help="Symbol of func to extract")
+    parser.add_argument('--address', type=auto_int, help="Address of func to extract", action='append')
+    parser.add_argument('--name', type=str, help="Name of extracted function", action='append')
 
-    parser.add_argument('--name', type=str, help="Name of extracted function")
+    parser.add_argument('--symbol', type=str, help="Symbol of func to extract", action='append')
 
     main(parser.parse_args())

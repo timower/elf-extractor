@@ -32,13 +32,35 @@ minimal.bin: minimal.c
 createThreads.s:
 	../main.py xochitl_2.12.1.527 --address 0x3d9714 > $@
 
+createThreads.so: createThreads.s
+	$(CC) $(CFLAGS) -shared $^ -o $@
+
 shutdownThreads.s:
 	../main.py xochitl_2.12.1.527 --address 0x3d96b8 > $@
+
+shutdownThreads.so: shutdownThreads.s
+	$(CC) $(CFLAGS) -shared $^ -o $@
 
 update.s:
 	../main.py xochitl_2.12.1.527 --address 0x3d8c94 > $@
 
+update.so: update.s
+	$(CC) $(CFLAGS) -shared $^ -o $@
+
+libxochitl.s:
+	../main.py xochitl_2.12.1.527 \
+		--address 0x3d8c94 --name update \
+		--address 0x3d96b8 --name shutdown \
+		--address 0x3d9714 --name create \
+		--address 0x3d8bf4 --name clear \
+	  --address 0x043c90 --name initBss > $@
+
+libxochitl.so: libxochitl.s
+	$(CC) $(CFLAGS) -shared $^ -o $@
+
+xochitl.bin: xochitl.c libxochitl.so
+	$(CC) $(CFLAGS) $^ -o $@ -Wl,-rpath='$$ORIGIN' -ldl -lstdc++ -lpthread
 
 .PHONY: clean all test_main
 clean:
-	rm -f *.bin *.so libtest.s createThreads.s shutdownThreads.s update.s
+	rm -f *.bin *.so libtest.s createThreads.s shutdownThreads.s update.s libxochitl.s

@@ -1,3 +1,4 @@
- * 'data in code' in code
+ * static initializers...
+ * GOT ref to code
  * GOT ref through stack spill
 
