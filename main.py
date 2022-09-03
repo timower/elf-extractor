@@ -11,8 +11,10 @@ from collections import defaultdict
 
 GOT_NAME = "_GLOBAL_OFFSET_TABLE_"
 
+
 def eprint(*args, **kwargs):
     print(*args, file=sys.stderr, **kwargs)
+
 
 # Utilities
 def is_terminator(label):
@@ -21,6 +23,7 @@ def is_terminator(label):
     if "__throw_" in label:
         return True
     return False
+
 
 def is_return(inst):
     if inst.mnemonic == "bx" and inst.op_str == "lr":
@@ -38,14 +41,17 @@ def is_return(inst):
 def is_branch(inst):
     return capstone.CS_GRP_JUMP in inst.groups
 
+
 def is_branch_reg(inst):
     return inst.mnemonic.startswith("bx") or inst.mnemonic.startswith("blx")
+
 
 def is_call(inst):
     return inst.mnemonic.startswith("bl") or inst.mnemonic.startswith("blx")
 
+
 def is_pic_add(inst):
-    """ add r3, pc, r """
+    """add r3, pc, r"""
     if len(inst.operands) != 3:
         return False
     op1 = inst.operands[0]
@@ -54,57 +60,70 @@ def is_pic_add(inst):
 
     reg_type = capstone.arm.ARM_OP_REG
 
-    return inst.mnemonic == "add" and \
-            op1.type == reg_type and \
-            op2.type == reg_type and \
-            op3.type == reg_type and \
-            op1.value.reg == op3.value.reg and \
-            op2.value.reg == capstone.arm.ARM_REG_PC
+    return (
+        inst.mnemonic == "add"
+        and op1.type == reg_type
+        and op2.type == reg_type
+        and op3.type == reg_type
+        and op1.value.reg == op3.value.reg
+        and op2.value.reg == capstone.arm.ARM_REG_PC
+    )
+
 
 def is_pic_load(inst):
     """
-      ldr r3, [r4, r3]
-      with r4 == got, r3 == got offset
-      or r4 == pc, r3 == PIC offset
+    ldr r3, [r4, r3]
+    with r4 == got, r3 == got offset
+    or r4 == pc, r3 == PIC offset
     """
     if len(inst.operands) != 2:
-      return False
+        return False
     op1 = inst.operands[0]
     op2 = inst.operands[1]
 
     reg_type = capstone.arm.ARM_OP_REG
     mem_type = capstone.arm.ARM_OP_MEM
 
-    return inst.mnemonic == "ldr" and \
-            op1.type == reg_type and op2.type == mem_type and \
-            op2.value.mem.disp == 0 and op2.value.mem.index != 0
-            # and \
-            # ((op2.value.mem.base == capstone.arm.ARM_REG_PC and \
-            #   op2.value.mem.disp == 0)) #  or \
+    return (
+        inst.mnemonic == "ldr"
+        and op1.type == reg_type
+        and op2.type == mem_type
+        and op2.value.mem.disp == 0
+        and op2.value.mem.index != 0
+    )
+    # and \
+    # ((op2.value.mem.base == capstone.arm.ARM_REG_PC and \
+    #   op2.value.mem.disp == 0)) #  or \
 
 
 def is_plt(section):
     return section.name == ".plt"
 
+
 def is_data(section):
     return section.name == ".data" or section.name == ".rodata"
+
 
 def is_bss(section):
     return section.name == ".bss"
 
+
 def is_got(section):
     return section.name == ".got"
+
 
 def is_text(section):
     return section.name == ".text"
 
 
 def ror(n, rotations, width):
-    return (2 ** width - 1) & (n >> rotations | n << (width - rotations))
+    return (2**width - 1) & (n >> rotations | n << (width - rotations))
+
 
 def sign_extend(value, bits):
     sign_bit = 1 << (bits - 1)
     return (value & (sign_bit - 1)) - (value & sign_bit)
+
 
 def to_i32(content):
     assert len(content) == 4
@@ -136,7 +155,7 @@ class Binary:
         return relocation.symbol
 
     def decode_plt(self, content, va):
-        content = content[:4*3] # PLT is 3 instructions
+        content = content[: 4 * 3]  # PLT is 3 instructions
         instrs = list(self.cs.disasm(content, va))
 
         # add ip, pc, #offset, (#offset)
@@ -178,8 +197,10 @@ class Binary:
 
         return False
 
+
 def dictdict(*args, **kwargs):
     return defaultdict(dict, *args, **kwargs)
+
 
 @dataclass
 class DisAsmCtx:
@@ -229,7 +250,7 @@ class DisAsmCtx:
 
         label = f".L{hex(address)}"
         self.labels[address] = label
-        self.addresses.append((address, self.reg_state.copy())) # TODO: new reg state?
+        self.addresses.append((address, self.reg_state.copy()))  # TODO: new reg state?
         return label
 
     def get_data_label(self, section, address):
@@ -272,7 +293,7 @@ class DisAsmCtx:
         elif is_got(pic_section):
             assert pic_section.virtual_address == pic_va
             self.data_in_code[pic_name] = f"{GOT_NAME} - ({pic_label} + 8)"
-            self.new_reg_state[reg] = GOT_NAME # TODO: reg state?
+            self.new_reg_state[reg] = GOT_NAME  # TODO: reg state?
         else:
             print(f"TODO PIC ref @ {hex(inst.address)}: {pic_name} -> {hex(pic_va)}")
 
@@ -282,8 +303,10 @@ class DisAsmCtx:
             return default
 
         last_op = inst.operands[-1]
-        if last_op.type == capstone.arm.ARM_OP_MEM and \
-                last_op.mem.base == capstone.arm.ARM_REG_PC:
+        if (
+            last_op.type == capstone.arm.ARM_OP_MEM
+            and last_op.mem.base == capstone.arm.ARM_REG_PC
+        ):
 
             if last_op.mem.index != 0:
                 # ldr rx, [ry, pc] handle by `handle_pic_ref`
@@ -299,19 +322,23 @@ class DisAsmCtx:
             if inst.mnemonic == "ldr":
                 self.handle_pc_ldr(inst, name)
 
-            return re.sub(r'\[.*\]', name, default)
+            return re.sub(r"\[.*\]", name, default)
 
         return default
 
     def get_jump_table_size(self, inst, prev_inst):
         """
-            cmp r3, #5
-            addls pc, pc, r3, lsl #
+        cmp r3, #5
+        addls pc, pc, r3, lsl #
         """
         if inst.mnemonic != "addls" or len(inst.operands) != 3:
             return None
 
-        if prev_inst is None or prev_inst.mnemonic != "cmp" or len(prev_inst.operands) != 2:
+        if (
+            prev_inst is None
+            or prev_inst.mnemonic != "cmp"
+            or len(prev_inst.operands) != 2
+        ):
             return None
 
         op1 = inst.operands[0]
@@ -322,8 +349,13 @@ class DisAsmCtx:
         prev_op2 = prev_inst.operands[1]
 
         reg_type = capstone.arm.ARM_OP_REG
-        if op1.type != reg_type or op2.type != reg_type or op3.type != reg_type or \
-                prev_op1.type != reg_type or prev_op2.type != capstone.arm.ARM_OP_IMM:
+        if (
+            op1.type != reg_type
+            or op2.type != reg_type
+            or op3.type != reg_type
+            or prev_op1.type != reg_type
+            or prev_op2.type != capstone.arm.ARM_OP_IMM
+        ):
             return None
 
         pc_reg = capstone.arm.ARM_REG_PC
@@ -367,10 +399,16 @@ def disassemble_at(binary, addresses, names=None):
         prev_inst = None
         for inst in binary.cs.disasm(content, cur_va):
             jump_table_size = ctx.get_jump_table_size(inst, prev_inst)
-            if jump_table_size is None and ((is_branch_reg(inst) and \
-                    inst.operands[0].value.reg != capstone.arm.ARM_REG_LR) or \
-               (len(inst.operands) > 1 and \
-                    inst.operands[0].value.reg == capstone.arm.ARM_REG_PC)):
+            if jump_table_size is None and (
+                (
+                    is_branch_reg(inst)
+                    and inst.operands[0].value.reg != capstone.arm.ARM_REG_LR
+                )
+                or (
+                    len(inst.operands) > 1
+                    and inst.operands[0].value.reg == capstone.arm.ARM_REG_PC
+                )
+            ):
                 print(f"TODO: indirect branch {inst}")
 
             if is_branch(inst) and not is_branch_reg(inst):
@@ -384,8 +422,9 @@ def disassemble_at(binary, addresses, names=None):
 
             if jump_table_size is not None:
                 jump_addresses = [
-                        (inst.address + 8 + i * 4, ctx.reg_state.copy())
-                        for i in range(jump_table_size + 1)]
+                    (inst.address + 8 + i * 4, ctx.reg_state.copy())
+                    for i in range(jump_table_size + 1)
+                ]
                 ctx.addresses.extend(jump_addresses)
 
             if is_pic_add(inst):
@@ -399,8 +438,11 @@ def disassemble_at(binary, addresses, names=None):
 
                 if base_reg == capstone.arm.ARM_REG_PC and idx_reg in ctx.reg_state:
                     ctx.handle_pic_ref(inst.address, idx_reg)
-                elif base_reg in ctx.reg_state and ctx.reg_state[base_reg] == GOT_NAME and \
-                        idx_reg in ctx.reg_state:
+                elif (
+                    base_reg in ctx.reg_state
+                    and ctx.reg_state[base_reg] == GOT_NAME
+                    and idx_reg in ctx.reg_state
+                ):
                     offset_name = ctx.reg_state[idx_reg]
                     offset_val = ctx.data_in_code[offset_name]
 
@@ -411,7 +453,9 @@ def disassemble_at(binary, addresses, names=None):
                     if got_val == 0:
                         data_label = binary.get_symbol(got_addr).name
                     else:
-                        data_section = binary.lief_binary.section_from_virtual_address(got_val)
+                        data_section = binary.lief_binary.section_from_virtual_address(
+                            got_val
+                        )
                         if is_text(data_section):
                             data_label = ctx.get_label(got_val)
                         else:
@@ -482,21 +526,29 @@ def main(args):
     if args.address:
         disassemble_at(binary, args.address, args.name)
     elif args.symbol:
-        symbols = [binary.lief_binary.get_symbol(symbol).value for symbol in args.symbol]
+        symbols = [
+            binary.lief_binary.get_symbol(symbol).value for symbol in args.symbol
+        ]
         disassemble_at(binary, symbols, args.symbol)
 
 
-
 if __name__ == "__main__":
+
     def auto_int(x):
         return int(x, 0)
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('input', type=str, help="Input binary")
+    parser.add_argument("input", type=str, help="Input binary")
 
-    parser.add_argument('--address', type=auto_int, help="Address of func to extract", action='append')
-    parser.add_argument('--name', type=str, help="Name of extracted function", action='append')
+    parser.add_argument(
+        "--address", type=auto_int, help="Address of func to extract", action="append"
+    )
+    parser.add_argument(
+        "--name", type=str, help="Name of extracted function", action="append"
+    )
 
-    parser.add_argument('--symbol', type=str, help="Symbol of func to extract", action='append')
+    parser.add_argument(
+        "--symbol", type=str, help="Symbol of func to extract", action="append"
+    )
 
     main(parser.parse_args())
